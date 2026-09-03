@@ -19,12 +19,12 @@ is terminated with CRLF, then the payload is percent-encoded and wrapped.
 
 ## Installation
 
-```console
+```go
 go install -v github.com/mfkrypt/gopherwrap@latest
 ```
 
 
-#### Interactive
+### > Interactive
 
 ```console
 $ gopherwrap
@@ -37,10 +37,10 @@ $ gopherwrap
 ```
 
 
-#### One-Shot
+### > One-Shot
 
 
-```console
+```bash
 gopherwrap -host 10.0.0.5 -port 6379 -payload 'SET test hello'
 gopherwrap -f payload.txt                         # read commands from a file
 echo 'AUTH secret
