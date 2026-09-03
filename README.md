@@ -24,12 +24,12 @@ go install -v github.com/mfkrypt/gopherwrap@latest
 ```
 
 
-### > Interactive
+### > TUI
 
 ```console
 $ gopherwrap
 
-  GopherWrap — Redis over gopher:// (SSRF)
+  GopherWrap — Redis → gopher://
   ┃ Host                          ┃ Port                    ┃ Payload
   ┃ Redis the SSRF point can …    ┃ Redis listens here …    ┃ SET test hello
   ┃ > 127.0.0.1                   ┃ > 6379                  ┃ [one command per line]
@@ -38,7 +38,6 @@ $ gopherwrap
 
 
 ### > One-Shot
-
 
 ```bash
 gopherwrap -host 10.0.0.5 -port 6379 -payload 'SET test hello'

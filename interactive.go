@@ -94,7 +94,8 @@ func promptConfig(prev session) (session, error) {
 				Title("Payload").
 				Lines(4).
 				CharLimit(0).
-				Description("One Redis command per line — CRLF is added automatically · alt+enter = new line · ctrl+e = $EDITOR · enter = encode").
+				ExternalEditor(false).
+				Description("Alt+Enter = new line · Enter = encode").
 				Value(&payload).
 				Validate(func(v string) error {
 					if len(splitCommands(v)) == 0 {
@@ -102,7 +103,7 @@ func promptConfig(prev session) (session, error) {
 					}
 					return nil
 				}),
-		).Title("GopherWrap — Redis over gopher:// (SSRF)"),
+		).Title("GopherWrap — Redis → gopher://"),
 	).WithTheme(huh.ThemeCharm()).Run()
 	if err != nil {
 		return session{}, err
