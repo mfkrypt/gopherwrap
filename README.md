@@ -17,6 +17,12 @@ is terminated with CRLF, then the payload is percent-encoded and wrapped.
 | `-d`        | print the double-encoded variant on the next line    |
 
 
+## Installation
+
+```console
+go install -v github.com/mfkrypt/gopherwrap@latest
+```
+
 
 #### Interactive
 
@@ -40,14 +46,6 @@ gopherwrap -f payload.txt                         # read commands from a file
 echo 'AUTH secret
 CONFIG GET dir' | gopherwrap                       # payload from stdin
 gopherwrap -d                                      # also print double-encoded form
-```
-
-
-
-## Installation
-
-```console
-go install -v github.com/mfkrypt/gopherwrap@latest
 ```
 
 
