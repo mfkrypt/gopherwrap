@@ -37,7 +37,7 @@ $ gopherwrap
 ```
 
 
-### > One-Shot
+### > One-Shot CLI
 
 ```bash
 gopherwrap -host 10.0.0.5 -port 6379 -payload 'SET test hello'
