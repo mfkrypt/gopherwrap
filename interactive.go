@@ -112,14 +112,25 @@ func promptConfig(prev session) (session, error) {
 
 // promptAgain asks whether to run another round (default yes — iterating
 // payloads is the common case).
+//
+// q (or Q) quits instantly. It is only bound on this prompt, never on the
+// payload form: there q is a normal character a user might legitimately
+// type ("SET queue x"), and huh matches quit keys before fields ever see
+// them, so a global q-quit would abort mid-typing.
 func promptAgain() (bool, error) {
 	again := true
-	err := huh.NewConfirm().
-		Title("Encode another payload?").
-		Affirmative("Run again").
-		Negative("Quit").
-		Value(&again).
-		Run()
+	km := huh.NewDefaultKeyMap()
+	km.Quit.SetKeys("q", "Q", "ctrl+c")
+	km.Quit.SetHelp("q", "quit")
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Encode another payload?").
+				Affirmative("Run again").
+				Negative("Quit").
+				Value(&again),
+		),
+	).WithKeyMap(km).Run()
 	if err != nil {
 		return false, err
 	}

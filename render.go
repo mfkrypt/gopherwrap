@@ -46,10 +46,10 @@ func renderResult(res Result) string {
 	}
 	fmt.Fprintf(&b, "  %s %s\n\n", label.Render("wire"), dim.Render(escapeVisible(res.Wire)))
 
-	b.WriteString(rule("gopher URL — inject this into the SSRF point") + "\n")
+	b.WriteString(rule("Encoded Gopher URL") + "\n")
 	fmt.Fprintf(&b, "  %s\n\n", urlStyl.Render(res.URL))
 
-	b.WriteString(rule("double-encoded — if the target URL-decodes once first") + "\n")
+	b.WriteString(rule("x2 Encoded Gopher URL") + "\n")
 	fmt.Fprintf(&b, "  %s\n", dim.Render(res.Double))
 
 	return b.String()
