@@ -15,11 +15,12 @@ type session struct {
 	host    string
 	port    string
 	payload string
+	resp    bool // frame commands as RESP arrays (default: inline text)
 }
 
 // newSession returns the first-round defaults.
 func newSession() session {
-	return session{host: "127.0.0.1", port: "6379", payload: "SET test hello"}
+	return session{host: "127.0.0.1", port: "6379", payload: "SET test hello", resp: false}
 }
 
 // toConfig parses the session into a validated Config.
@@ -28,7 +29,7 @@ func (s session) toConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{Host: s.host, Port: port, Payload: s.payload}, nil
+	return Config{Host: s.host, Port: port, Payload: s.payload, Resp: s.resp}, nil
 }
 
 // runInteractive drives the loop: form → encode → render → ask again.
@@ -70,7 +71,7 @@ func mustConfig(s session) Config {
 // promptConfig shows the main form. The fields mirror the core validators
 // so invalid input is rejected inline, at the field, before encoding.
 func promptConfig(prev session) (session, error) {
-	host, port, payload := prev.host, prev.port, prev.payload
+	host, port, payload, resp := prev.host, prev.port, prev.payload, prev.resp
 
 	err := huh.NewForm(
 		huh.NewGroup(
@@ -90,6 +91,15 @@ func promptConfig(prev session) (session, error) {
 					_, err := parsePort(v)
 					return err
 				}),
+			// Framing precedes Payload on purpose: huh validates fields as
+			// the user advances, and the payload validator below needs the
+			// final mode to know whether to tokenize.
+			huh.NewConfirm().
+				Title("Framing").
+				Description("Inline: CRLF per command, Redis splits args. RESP: multi-bulk arrays, length-prefixed args (\\n, \\xHH escapes decode inside quotes).").
+				Affirmative("RESP arrays").
+				Negative("Inline text").
+				Value(&resp),
 			huh.NewText().
 				Title("Payload").
 				Lines(4).
@@ -98,17 +108,23 @@ func promptConfig(prev session) (session, error) {
 				Description("Alt+Enter = new line · Enter = encode").
 				Value(&payload).
 				Validate(func(v string) error {
-					if len(splitCommands(v)) == 0 {
+					cmds := splitCommands(v)
+					if len(cmds) == 0 {
 						return errors.New("payload needs at least one Redis command")
+					}
+					if resp {
+						if _, err := commandsToRESP(cmds); err != nil {
+							return err
+						}
 					}
 					return nil
 				}),
-		).Title("GopherWrap — Redis → gopher://"),
+		),
 	).WithTheme(huh.ThemeCharm()).Run()
 	if err != nil {
 		return session{}, err
 	}
-	return session{host: host, port: port, payload: payload}, nil
+	return session{host: host, port: port, payload: payload, resp: resp}, nil
 }
 
 // promptAgain asks whether to run another round (default yes — iterating

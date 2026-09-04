@@ -85,6 +85,93 @@ func TestCommandsToWire(t *testing.T) {
 	}
 }
 
+func TestSplitArgs(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    []string
+		wantErr bool
+	}{
+		{in: "SET test hello", want: []string{"SET", "test", "hello"}},
+		{in: "  SET   spaced\targs  ", want: []string{"SET", "spaced", "args"}},
+		{in: `SET key "hello world"`, want: []string{"SET", "key", "hello world"}},
+		{in: `SET k 'single quoted'`, want: []string{"SET", "k", "single quoted"}},
+		{in: `""`, want: []string{""}}, // empty quoted arg is a real $0 argument
+		{in: `SET "" x`, want: []string{"SET", "", "x"}},
+		{in: `key"a b"`, want: []string{"keya b"}},           // quotes toggle mid-word, like Redis
+		{in: `SET a\b c`, want: []string{"SET", `a\b`, "c"}}, // bare backslash is literal
+		// double quotes decode escapes to real bytes
+		{in: "SET cron \"*/1 * * * * root /tmp/p.sh\\n\"", want: []string{"SET", "cron", "*/1 * * * * root /tmp/p.sh\n"}},
+		{in: `"tab\there"`, want: []string{"tab\there"}},
+		{in: `"back\\slash"`, want: []string{`back\slash`}},
+		{in: `"say \"hi\""`, want: []string{`say "hi"`}},
+		{in: `"A\x42"`, want: []string{"AB"}},
+		{in: `"nul\x00byte"`, want: []string{"nul\x00byte"}},
+		// single quotes group literally; \' is the only escape
+		{in: `'it\'s'`, want: []string{"it's"}},
+		{in: `'no\nescape'`, want: []string{`no\nescape`}},
+
+		{in: `SET "unclosed`, wantErr: true},
+		{in: `SET 'unclosed`, wantErr: true},
+		{in: `SET "a\q"`, wantErr: true},   // unknown escape
+		{in: `SET "a\x"`, wantErr: true},   // \x needs two hex digits
+		{in: `SET "a\x4z"`, wantErr: true}, // second hex digit missing
+		{in: `SET "a"b`, wantErr: true},    // closing quote must end the argument
+		{in: `SET "a\`, wantErr: true},     // dangling backslash
+	}
+	for _, tt := range tests {
+		got, err := splitArgs(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("splitArgs(%q): expected error, got %#v", tt.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("splitArgs(%q): unexpected error: %v", tt.in, err)
+			continue
+		}
+		if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+			t.Errorf("splitArgs(%q) = %#v, want %#v", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCommandsToRESP(t *testing.T) {
+	tests := []struct {
+		in      []string
+		want    string
+		wantErr bool
+	}{
+		{in: []string{"PING"}, want: "*1\r\n$4\r\nPING\r\n"},
+		{in: []string{"SET k v", "PING"},
+			want: "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n*1\r\n$4\r\nPING\r\n"},
+		// the escaped \n decodes into a real LF byte inside the $27 bulk —
+		// the payload inline framing could never carry
+		{in: []string{`SET cron "*/1 * * * * root /tmp/p.sh\n"`},
+			want: "*3\r\n$3\r\nSET\r\n$4\r\ncron\r\n$27\r\n*/1 * * * * root /tmp/p.sh\n\r\n"},
+		// CRLF inside an argument is length-protected, not a frame break
+		{in: []string{`SET x "a\r\nb"`},
+			want: "*3\r\n$3\r\nSET\r\n$1\r\nx\r\n$4\r\na\r\nb\r\n"},
+		{in: []string{`SET "unclosed`}, wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := commandsToRESP(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("commandsToRESP(%q): expected error, got %q", tt.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("commandsToRESP(%q): unexpected error: %v", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("commandsToRESP(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestPercentEncode(t *testing.T) {
 	tests := []struct {
 		in, want string
@@ -137,6 +224,9 @@ func TestEncodeGolden(t *testing.T) {
 	if res.Host != "127.0.0.1" || res.Port != 6379 {
 		t.Errorf("encode(default).Host/Port = %q/%d", res.Host, res.Port)
 	}
+	if res.Framing != "inline" {
+		t.Errorf("encode(default).Framing = %q, want inline (back-compat)", res.Framing)
+	}
 
 	multi := Config{Host: "::1", Port: 6380, Payload: "AUTH hunter2\nCONFIG SET dir /var/spool/cron\n"}
 	res, err = encode(multi)
@@ -159,13 +249,44 @@ func TestEncodeGolden(t *testing.T) {
 	}
 }
 
+func TestEncodeRESP(t *testing.T) {
+	res, err := encode(Config{Host: "127.0.0.1", Port: 6379,
+		Payload: "SET cron \"*/1 * * * * root /tmp/p.sh\\n\"", Resp: true})
+	if err != nil {
+		t.Fatalf("encode(resp): %v", err)
+	}
+	wantWire := "*3\r\n$3\r\nSET\r\n$4\r\ncron\r\n$27\r\n*/1 * * * * root /tmp/p.sh\n\r\n"
+	if res.Wire != wantWire {
+		t.Errorf("encode(resp).Wire = %q, want %q", res.Wire, wantWire)
+	}
+	if res.Framing != "RESP" {
+		t.Errorf("encode(resp).Framing = %q, want RESP", res.Framing)
+	}
+	if len(res.Commands) != 1 {
+		t.Errorf("encode(resp).Commands = %#v", res.Commands)
+	}
+	// The URL is the frame's bytes percent-encoded after the underscore;
+	// percentEncode itself is golden-tested above, so composing keeps the
+	// expectation readable while still pinning the full pipeline.
+	wantURL := "gopher://127.0.0.1:6379/_" + percentEncode(wantWire)
+	if res.URL != wantURL {
+		t.Errorf("encode(resp).URL = %q, want %q", res.URL, wantURL)
+	}
+	if res.Double != doubleEncode(wantURL) {
+		t.Errorf("encode(resp).Double is not the double-encoding of URL")
+	}
+}
+
 func TestEncodeErrors(t *testing.T) {
 	for name, cfg := range map[string]Config{
-		"empty payload": {Host: "127.0.0.1", Port: 6379, Payload: "\n  \n"},
-		"blank host":    {Host: "", Port: 6379, Payload: "PING"},
-		"bad host":      {Host: "redis:6379", Port: 6379, Payload: "PING"},
-		"bad port":      {Host: "127.0.0.1", Port: 99999, Payload: "PING"},
-		"zero port":     {Host: "127.0.0.1", Port: 0, Payload: "PING"},
+		"empty payload":      {Host: "127.0.0.1", Port: 6379, Payload: "\n  \n"},
+		"blank host":         {Host: "", Port: 6379, Payload: "PING"},
+		"bad host":           {Host: "redis:6379", Port: 6379, Payload: "PING"},
+		"bad port":           {Host: "127.0.0.1", Port: 99999, Payload: "PING"},
+		"zero port":          {Host: "127.0.0.1", Port: 0, Payload: "PING"},
+		"resp bad quotes":    {Host: "127.0.0.1", Port: 6379, Payload: `SET "oops`, Resp: true},
+		"resp bad escape":    {Host: "127.0.0.1", Port: 6379, Payload: `SET x "\q"`, Resp: true},
+		"resp multi cmd err": {Host: "127.0.0.1", Port: 6379, Payload: "PING\nSET x 'no", Resp: true},
 	} {
 		if _, err := encode(cfg); err == nil {
 			t.Errorf("encode(%s): expected error", name)

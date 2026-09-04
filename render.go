@@ -44,6 +44,7 @@ func renderResult(res Result) string {
 	for i, c := range res.Commands {
 		fmt.Fprintf(&b, "%12s%2d  %s\n", "", i+1, c)
 	}
+	fmt.Fprintf(&b, "  %s %s\n", label.Render("framing"), res.Framing)
 	fmt.Fprintf(&b, "  %s %s\n\n", label.Render("wire"), dim.Render(escapeVisible(res.Wire)))
 
 	b.WriteString(rule("Encoded Gopher URL") + "\n")

@@ -14,16 +14,12 @@ import (
 	"golang.org/x/term"
 )
 
-const usageText = `GopherWrap — Redis commands → gopher:// URL (SSRF testing).
+const usageText = `GopherWrap — Redis commands → gopher:// URL.
 
 Modes:
-  gopherwrap                  interactive form (Host / Port / Payload)
-  gopherwrap -f cmds.txt      encode a payload file, print the URL
-  echo 'SET x 1' | gopherwrap read the payload from stdin
-
-Every payload line is one Redis command; CRLF is appended automatically.
-The gopher URL is printed alone on stdout so it can be piped to other
-tools. Add -d to also print the double-encoded variant.
+  gopherwrap                  	TUI (Host / Port / Payload)
+  gopherwrap -f cmds.txt      	encode a payload file
+  echo 'SET x 1' | gopherwrap 	read the payload from stdin
 
 Flags:`
 
@@ -33,6 +29,7 @@ type options struct {
 	payload string
 	file    string
 	double  bool
+	resp    bool
 	seen    map[string]bool // flags set explicitly on the command line
 }
 
@@ -62,6 +59,7 @@ func parseFlags(args []string) options {
 	fs.StringVar(&opts.file, "file", "", "read the payload from this file")
 	fs.StringVar(&opts.file, "f", "", "alias for -file")
 	fs.BoolVar(&opts.double, "d", false, "also print the double-encoded variant")
+	fs.BoolVar(&opts.resp, "resp", false, "frame commands as RESP multi-bulk arrays (length-prefixed, binary-safe) instead of inline text")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2) // flag pkg already printed the reason + usage
 	}
@@ -83,7 +81,7 @@ func run(opts options, stdin io.Reader, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return encodeAndPrint(Config{Host: opts.host, Port: opts.port, Payload: payload}, opts.double, stdout)
+		return encodeAndPrint(Config{Host: opts.host, Port: opts.port, Payload: payload, Resp: opts.resp}, opts.double, stdout)
 	case isTerminal(stdin):
 		return runInteractive(stdout, stderr)
 	default:
